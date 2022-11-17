@@ -1,0 +1,582 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Securily Customer Pentest VPC 3 Layer Multiregion'
+
+Parameters:
+  ClassB:
+    Description: 'Class B of VPC (10.XXX.0.0/16)'
+    Type: Number
+    Default: 0
+    ConstraintDescription: 'Must be in the range [0-255]'
+    MinValue: 0
+    MaxValue: 255
+  CustomerAlias:
+    Type: String
+    Description: Please enter the CustomerAlias(example = bank123)
+
+
+Resources:
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${CustomerAlias}-lambda-SG'
+      GroupDescription: SG-for-lambda
+      VpcId: !Sub '${VPC}'
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-LambdaSecurityGroup-cloudsploit'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+
+  SecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: LambdaSecurityGroup
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  LambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonVPCFullAccess
+      Policies:
+        - PolicyName: !Sub '${CustomerAlias}-${AWS::Region}-LambdaFunctionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ec2:*
+                  - lambda:*
+                  - ssm:GetParameter
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-LambdaRole'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+
+  LambdaFunctionTestAssumeRole:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'securily-ops-test-assume-role-${CustomerAlias}'
+      Environment:
+        Variables:
+          Region: !Sub '${AWS::Region}'
+          CustomerAlias: !Sub '${CustomerAlias}'
+          Debug: 0
+      VpcConfig:
+        SecurityGroupIds:
+          - Ref: LambdaSecurityGroup
+        SubnetIds:
+          - !Sub '${SubnetAPrivate}'
+          - !Sub '${SubnetBPrivate}'
+          - !Sub '${SubnetCPrivate}'
+      Runtime: python3.9
+      Timeout: 300
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaFunctionRole.Arn
+      Code:
+        ZipFile:
+          !Sub
+          - |-
+            #!/usr/bin/env python3
+            import json, boto3
+            import time
+            import threading
+            import logging
+            import os
+            from urllib.request import Request, urlopen
+
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+
+            def lambda_handler(event, context):
+                from urllib.request import Request, urlopen
+                url = 'http://checkip.amazonaws.com'
+                with urlopen(Request(url)) as response:
+                     print(response.read().decode('utf-8'))
+
+                debugPrint = os.environ['Debug']
+
+                ssmClient = boto3.client('ssm')
+
+                roleArn = ssmClient.get_parameter(
+                    Name=os.environ['CustomerAlias']+'-Cloud-Scanner-Rolearn',
+                    WithDecryption=True
+                )
+
+                externalId = ssmClient.get_parameter(
+                    Name=os.environ['CustomerAlias']+'-Cloud-Scanner-Externalid',
+                    WithDecryption=True
+                )
+
+                if bool(debugPrint) and debugPrint==1:
+                    print('CustomerAlias:', os.environ['CustomerAlias'])
+                    print('Role-Arn:', roleArn['Parameter']['Value'])
+                    logger.info('Test roleArn: %s', json.dumps(roleArn, default=str))
+                    print('External-Id:', externalId['Parameter']['Value'])
+                    logger.info('Test externalId: %s', json.dumps(externalId, default=str))
+
+                stsClient = boto3.client("sts")
+
+                response = stsClient.assume_role(
+                    RoleArn=roleArn['Parameter']['Value'],
+                    RoleSessionName="Securily-Cloud-Scanner-Access-Tester",
+                    ExternalId=externalId['Parameter']['Value'],
+                    DurationSeconds=900
+                )
+
+                if bool(debugPrint) and debugPrint==1:
+                    logger.info('Test results: %s', json.dumps(response, default=str))
+
+                if bool(response['Credentials']['SecretAccessKey']):
+                    return {
+                        'statusCode': 200,
+                        'body': json.dumps('Test for RoleArn:' + roleArn['Parameter']['Value'] + ' Succeeded')
+                    }
+                else:
+                    return {
+                        'statusCode': 403,
+                        'body': json.dumps('Unauthorized RoleArn:' + roleArn['Parameter']['Value'] + ' Succeeded')
+                    }
+          - lambda_function_role_arn: !Ref LambdaFunctionRole
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-SecurilyOpsTestAssumeRole'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: !Sub '10.${ClassB}.0.0/16'
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-VPC'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-IG'
+  VPCGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  SubnetAPublic:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Sub '10.${ClassB}.0.0/20'
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-PUB-SUBNET-AZ-A'
+        - Key: Reach
+          Value: public
+  SubnetBPublic:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Sub '10.${ClassB}.32.0/20'
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-PUB-SUBNET-AZ-B'
+        - Key: Reach
+          Value: public
+  SubnetCPublic:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: !Sub '10.${ClassB}.64.0/20'
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-PUB-SUBNET-AZ-C'
+        - Key: Reach
+          Value: public
+  SubnetAPrivate:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Sub '10.${ClassB}.16.0/20'
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-PRIV-SUBNET-AZ-A'
+        - Key: Reach
+          Value: private
+  SubnetBPrivate:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Sub '10.${ClassB}.48.0/20'
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-PRIV-SUBNET-AZ-B'
+        - Key: Reach
+          Value: private
+  SubnetCPrivate:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: !Sub '10.${ClassB}.80.0/20'
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-PRIV-SUBNET-AZ-C'
+        - Key: Reach
+          Value: private
+  SubnetAIntra:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Sub '10.${ClassB}.96.0/20'
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-INTRA-SUBNET-AZ-A'
+        - Key: Reach
+          Value: private
+  SubnetBIntra:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Sub '10.${ClassB}.112.0/20'
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-INTRA-SUBNET-AZ-B'
+        - Key: Reach
+          Value: private
+  SubnetCIntra:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: !Sub '10.${ClassB}.128.0/20'
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-INTRA-SUBNET-AZ-C'
+        - Key: Reach
+          Value: private
+  RouteTablePublic: # should be RouteTablePublic
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-PUBLIC-RT'
+  RouteTablePrivate: # should be RouteTablePrivate
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-PRIVATE-RT'
+  RouteTableIntra:  # should be RouteTableIntra
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-INTRA-RT'
+  RouteTableAssociationAPublic:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetAPublic
+      RouteTableId: !Ref RouteTablePublic
+  RouteTableAssociationBPublic:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetBPublic
+      RouteTableId: !Ref RouteTablePublic
+  RouteTableAssociationCPublic:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetCPublic
+      RouteTableId: !Ref RouteTablePublic
+  RouteTableAssociationAPrivate:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetAPrivate
+      RouteTableId: !Ref RouteTablePrivate
+  RouteTableAssociationBPrivate:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetBPrivate
+      RouteTableId: !Ref RouteTablePrivate
+  RouteTableAssociationCPrivate:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetCPrivate
+      RouteTableId: !Ref RouteTablePrivate
+  RouteTableAssociationAIntra:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetAIntra
+      RouteTableId: !Ref RouteTableIntra
+  RouteTableAssociationBIntra:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetBIntra
+      RouteTableId: !Ref RouteTableIntra
+  RouteTableAssociationCIntra:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref SubnetCIntra
+      RouteTableId: !Ref RouteTableIntra
+  RouteTablePublicInternetRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+  EIP:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-EIP'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+  NatGateway:
+    Type: 'AWS::EC2::NatGateway'
+    Properties:
+      AllocationId: !GetAtt EIP.AllocationId
+      SubnetId: !Ref SubnetAPublic
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-NAT'
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - SNSTopicPolicy
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketName: !Sub '${CustomerAlias}-scans-results'
+      NotificationConfiguration:
+        TopicConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Topic: !Ref SNSScanResultsS3
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteContentAfter7Day
+            Status: 'Enabled'
+            ExpirationInDays: 7
+      Tags:
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-${AWS::Region}-s3-scan-results-bucket'
+  SNSScanResultsS3:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName:
+        Fn::Sub: ${CustomerAlias}-${AWS::Region}-SNSScanResultsS3
+  SNSScanResultsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: scanresults@securily.com
+      Protocol: email
+      TopicArn: !Ref SNSScanResultsS3
+  SNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 's3.amazonaws.com'
+            Action: sns:Publish
+            Resource: !Ref SNSScanResultsS3
+      Topics:
+        - !Ref SNSScanResultsS3
+Outputs:
+  TemplateID:
+    Description: 'Securily template'
+    Value: 'Securily template'
+  AZs:
+    Description: 'AZs'
+    Value: 3
+    Export:
+      Name: !Sub '${CustomerAlias}-AZs'
+  AZA:
+    Description: 'AZ of A'
+    Value: !Select [0, !GetAZs '']
+    Export:
+      Name: !Sub '${CustomerAlias}-AZA'
+  AZB:
+    Description: 'AZ of B'
+    Value: !Select [1, !GetAZs '']
+    Export:
+      Name: !Sub '${CustomerAlias}-AZB'
+  AZC:
+    Description: 'AZ of C'
+    Value: !Select [2, !GetAZs '']
+    Export:
+      Name: !Sub '${CustomerAlias}-AZC'
+  ClassB:
+    Description: 'Class B.'
+    Value: !Ref ClassB
+    Export:
+      Name: !Sub '${CustomerAlias}-ClassB'
+  VPC:
+    Description: 'VPC.'
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${CustomerAlias}-VPC'
+  SubnetsPublic:
+    Description: 'Subnets public.'
+    Value: !Join [',', [!Ref SubnetAPublic, !Ref SubnetBPublic, !Ref SubnetCPublic]]
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetsPublic'
+  SubnetsPrivate:
+    Description: 'Subnets private.'
+    Value: !Join [',', [!Ref SubnetAPrivate, !Ref SubnetBPrivate, !Ref SubnetCPrivate]]
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetsPrivate'
+  SubnetsIntra:
+    Description: 'Subnets intra.'
+    Value: !Join [',', [!Ref SubnetAIntra, !Ref SubnetBIntra, !Ref SubnetCIntra]]
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetsIntra'
+  RouteTablePublic: # deprecated in v4, will be removed in v5
+    Description: 'Route table public (deprecated in v4, will be removed in v5).'
+    Value: !Ref RouteTablePublic
+    Export:
+      Name: !Sub '${CustomerAlias}-RouteTablePublic'
+  RouteTablePrivate: # deprecated in v4, will be removed in v5
+    Description: 'Route table private (deprecated in v4, will be removed in v5).'
+    Value: !Ref RouteTablePrivate
+    Export:
+      Name: !Sub '${CustomerAlias}-RouteTablePrivate'
+  RouteTableIntra: # deprecated in v4, will be removed in v5
+    Description: 'Route table intra (deprecated in v4, will be removed in v5).'
+    Value: !Ref RouteTableIntra
+    Export:
+      Name: !Sub '${CustomerAlias}-RouteTableIntra'
+  SubnetAPublic:
+    Description: 'Subnet A public.'
+    Value: !Ref SubnetAPublic
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetAPublic'
+  SubnetAPrivate:
+    Description: 'Subnet A private.'
+    Value: !Ref SubnetAPrivate
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetAPrivate'
+  SubnetBPublic:
+    Description: 'Subnet B public.'
+    Value: !Ref SubnetBPublic
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetBPublic'
+  SubnetBPrivate:
+    Description: 'Subnet B private.'
+    Value: !Ref SubnetBPrivate
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetBPrivate'
+  SubnetCPublic:
+    Description: 'Subnet C public.'
+    Value: !Ref SubnetCPublic
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetCPublic'
+  SubnetCPrivate:
+    Description: 'Subnet C private.'
+    Value: !Ref SubnetCPrivate
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetCPrivate'
+  SubnetAIntra:
+    Description: 'Subnet A intra.'
+    Value: !Ref SubnetAIntra
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetAIntra'
+  SubnetBIntra:
+    Description: 'Subnet B intra.'
+    Value: !Ref SubnetBIntra
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetBIntra'
+  SubnetCIntra:
+    Description: 'Subnet C intra.'
+    Value: !Ref SubnetCIntra
+    Export:
+      Name: !Sub '${CustomerAlias}-SubnetCIntra'
+  NatGateway:
+    Description: 'NAT Gateway.'
+    Value: !Ref NatGateway
+    Export:
+      Name: !Sub '${CustomerAlias}-NAT'
+  S3Bucket:
+    Description: 'Bucket Created using this template.'
+    Value: !Ref S3Bucket
+  CustomerAlias:
+    Description: 'Bucket Created using this template.'
+    Value: !Sub '${CustomerAlias}'

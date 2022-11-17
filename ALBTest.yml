@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ALB Application Load Balancer for redirection only'
+
+Parameters:
+  MyALBName:
+    Type: 'String'
+    Default: 'alb-redirect'
+  VPC:
+    Type: 'AWS::EC2::VPC::Id'
+    Default: 'vpc-********'
+  ALBSubnetList:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Default: 'subnet-********,subnet-********'
+  ALBExistingCertArn:
+    Type: 'String'
+    Default: 'arn:aws:acm:<my-region>:<my-account>:certificate/********-****-****-****-********'
+  DestinationHost:
+    Type: 'String'
+    Default: 'www.example.com'
+
+Resources:
+  ALBInstance:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      LoadBalancerAttributes:
+        - Key: 'deletion_protection.enabled'
+          Value: True
+        - Key: 'access_logs.s3.enabled'
+          Value: False
+      Name: !Sub  'alb-${MyALBName}'
+      Scheme: 'internet-facing'
+      Subnets: !Ref 'ALBSubnetList'
+      SecurityGroups:
+        - !Ref 'ALBSecurityGroup'
+  
+  ALBListenerSSL:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - RedirectConfig:
+            Host: !Ref DestinationHost
+            Path: "/#{path}"
+            Port: 443
+            Protocol: "HTTPS"
+            Query: "#{query}"
+            StatusCode: HTTP_301
+          Type: "redirect"
+      Certificates:
+        - CertificateArn: !Ref ALBExistingCertArn
+      LoadBalancerArn: !Ref 'ALBInstance'
+      Port: 443
+      Protocol: 'HTTPS'
+
+  ALBListenerSSLRule1:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - RedirectConfig:
+            Host: !Ref DestinationHost
+            Path: "/contact/"
+            Port: 443
+            Protocol: "HTTPS"
+            Query: "#{query}"
+            StatusCode: HTTP_301
+          Type: "redirect"
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/contact-2/"
+      ListenerArn:
+        Ref: ALBListenerSSL
+      Priority: 1
+
+  ALBListenerSSLRule2:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - RedirectConfig:
+            Host: !Ref DestinationHost
+            Path: "/new-path-example/"
+            Port: 443
+            Protocol: "HTTPS"
+            Query: "#{query}"
+            StatusCode: HTTP_301
+          Type: "redirect"
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - "/old-path-example/"
+      ListenerArn:
+        Ref: ALBListenerSSL
+      Priority: 2
+
+  ALBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - RedirectConfig:
+            Host: !Ref DestinationHost
+            Path: "/#{path}"
+            Port: 443
+            Protocol: "HTTPS"
+            Query: "#{query}"
+            StatusCode: HTTP_301
+          Type: "redirect"
+      LoadBalancerArn: !Ref 'ALBInstance'
+      Port: 80
+      Protocol: 'HTTP'
+
+  ALBSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Allow incoming from anywhere to HTTPS and HTTP"
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0"
+          FromPort: 80
+          IpProtocol: "tcp"
+          ToPort: 80
+        - CidrIp: "0.0.0.0/0"
+          FromPort: 443
+          IpProtocol: "tcp"
+          ToPort: 443
+      Tags:
+        - Key: "Used by"
+          Value: !Ref "MyALBName"
+      VpcId: !Ref "VPC"
+      
+Outputs:
+  ALBEndpoint:
+    Value: !GetAtt 'ALBInstance.DNSName'
+    Description: 'LoadBalancer DNS name'
+  ALBName:
+    Value: !GetAtt 'ALBInstance.LoadBalancerName'
+    Description: 'Unique load balancer name'

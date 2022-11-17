@@ -1,0 +1,201 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: cloudmapper Open Source Scan for Securily Pentest VPC
+Parameters:
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: Please enter the VPCId.
+  CustomerAlias:
+    Type: String
+    Description: Please enter the CustomerAlias(example = bank123)
+  SubnetId:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: Please enter the subnetId.
+  InstanceType:
+    Type: String
+    Default: t3a.small
+    AllowedValues:
+      - t3a.xlarge
+      - t3a.medium
+      - t3a.2xlarge
+      - t3a.large
+      - t3a.small
+      - t3a.micro
+    Description: Please enter the instance type example t3a.medium,t3a.large,t3a.xlarge,t3a.2xlarge
+  AmiID:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Description: Query for the latest Amazon Linux AMI IDs using AWS Systems Manager Parameter Store
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  AwsRegion:
+    Type: String
+    Default: us-east-1
+    AllowedValues:
+      - us-east-1
+      - us-east-2
+      - us-west-1
+      - us-west-2
+      - af-south-1
+      - ap-east-1
+      - ap-southeast-3
+      - ap-southeast-2
+      - ap-southeast-1
+      - ap-northeast-1
+      - ap-northeast-2
+      - ap-northeast-3
+      - ap-south-1
+      - ca-central-1
+      - eu-central-1
+      - eu-west-1
+      - eu-west-2
+      - eu-south-1
+      - eu-west-3
+      - eu-north-1
+      - me-south-1
+      - me-central-1
+      - sa-east-1
+    Description: Enter any region
+  Cidr:
+    Type: String
+    Description: Please put the cidr range of your subnet.
+  Accountid:
+    Type: String
+    Description: Please enter the id of your account such as >> 111122223333
+
+
+Resources:
+ cloudmapperSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to client host
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 7474
+          ToPort: 7474
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 7473
+          ToPort: 7473
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 7687
+          ToPort: 7687
+          CidrIp: 0.0.0.0/0
+    Properties:
+      GroupName: !Sub '${CustomerAlias}-cloudmapperScannerInstance-SG'
+      VpcId: !Ref VpcId
+      GroupDescription: "Allow SSH/HTTPS traffic"
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-cloudmapperSecurityGroup'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+ Ec2SsmIamRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess 
+        - arn:aws:iam::aws:policy/SecurityAudit
+        - arn:aws:iam::aws:policy/job-function/ViewOnlyAccess      
+      Policies:
+        - PolicyName: !Sub ${CustomerAlias}-sts-assume-role
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "sts:*"
+                Resource: "*"          
+        - PolicyName: !Sub ${CustomerAlias}-access-to-specific-S3-bucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                  - "s3:*"
+                Effect: "Allow"
+                Resource:
+                  - !Sub arn:aws:s3:::${CustomerAlias}-scans-results
+                  - !Sub arn:aws:s3:::${CustomerAlias}-scans-results/*
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-Ec2SsmIamRole-cloudmapper'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+ Ec2SsmInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: /
+      Roles: [!Ref Ec2SsmIamRole]
+ S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketName: !Sub '${CustomerAlias}-scans-results'
+ cloudmapperScannerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiID
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: '30'
+            DeleteOnTermination: 'true'
+            Encrypted: 'true'
+      SecurityGroupIds:
+        - !Ref cloudmapperSecurityGroup
+      SubnetId: !Ref SubnetId
+      IamInstanceProfile: !Ref Ec2SsmInstanceProfile
+      UserData:
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash -xe
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+            sudo yum update -y && sudo yum upgrade -y
+            sudo yum install -y python3 jq git awscli autoconf automake libtool python3-devel.x86_64 python3-tkinter
+            cd /home/ec2-user
+            git clone https://github.com/duo-labs/cloudmapper
+            cd /home/ec2-user/cloudmapper
+            python3 -m venv ./venv && source venv/bin/activate
+            pip3 install --upgrade pip
+            pip3 install -r requirements.txt
+            python cloudmapper.py configure add-account --config-file config.json --name ${CustomerAlias} --id ${Accountid}
+            python cloudmapper.py configure add-cidr --config-file config.json --cidr ${Cidr} --name ${CustomerAlias}
+            python cloudmapper.py collect --account ${CustomerAlias}
+            python cloudmapper.py report --account ${CustomerAlias}
+            python cloudmapper.py prepare --account ${CustomerAlias}
+
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-EC2-cloudmapper'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+Outputs:
+  InstanceId:
+    Description: cloudmapper InstanceId
+    Value: !Ref 'cloudmapperScannerInstance'
+    Export:
+      Name: !Sub '${CustomerAlias}-cloudmapperScannerInstanceId'
+  SgId:
+    Description: cloudmapperScannerInstance Security Group Id
+    Value: !Ref 'cloudmapperSecurityGroup'

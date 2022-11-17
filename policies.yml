@@ -1,0 +1,68 @@
+    Policies:
+        - PolicyName: !Sub ${CustomerName}-sts-assume-role
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "sts:*"
+                Resource: "*"          
+        - PolicyName: !Sub ${CustomerName}-access-to-specific-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetResourcePolicy
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:ListSecretVersionIds
+                Resource:
+                  - arn:aws:secretsmanager:::thecloudroot-Cloud-Scanner-Credentials-RbnJeZ
+              - 
+                Effect: Allow
+                Action: secretsmanager:ListSecrets
+                Resource: "*"
+
+
+
+        - PolicyName: !Sub ${CustomerName}-access-to-specific-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+              - Action:
+                  - secretsmanager:GetResourcePolicy
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:ListSecretVersionIds
+                Resource:
+                  - !Sub arn:aws:secretsmanager::secret:thecloudroot-Cloud-Scanner-Credentials-RbnJeZ
+                Effect: Allow
+                Action: secretsmanager:ListSecrets
+                Resource: "*"
+
+
+
+      Policies:
+        - PolicyName: !Sub ${CustomerAlias}-sts-assume-role
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "sts:*"
+                Resource: "*"
+        - PolicyName: !Sub ${CustomerAlias}-access-to-specific-S3-bucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                  - "s3:*"
+                Effect: "Allow"
+                Resource:
+                  - !Sub arn:aws:s3:::${CustomerAlias}-scans-results
+                  - !Sub arn:aws:s3:::${CustomerAlias}-scans-results/*

@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Cartography Open Source Scan for Securily Pentest VPC
+Parameters:
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: Please enter the VPCId.
+  CustomerAlias:
+    Type: String
+    Description: Please enter the CustomerAlias(example = bank123)
+  SubnetId:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: Please enter the subnetId.
+  InstanceType:
+    Type: String
+    Default: t3a.medium
+    AllowedValues:
+      - t3a.xlarge
+      - t3a.medium
+      - t3a.2xlarge
+      - t3a.large
+      - t3a.small
+      - t3a.micro
+    Description: Please enter the instance type example t3a.medium,t3a.large,t3a.xlarge,t3a.2xlarge
+  AmiID:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Description: Query for the latest Amazon Linux AMI IDs using AWS Systems Manager Parameter Store
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  cartographyVersion:
+    Type: String
+    Default: 0.65.0
+    Description: Please enter the Version of Catography example=0.65.0
+  password:
+    Type: String
+    NoEcho: True
+  AwsRegion:
+    Type: String
+    Default: us-east-1
+    AllowedValues:
+      - us-east-1
+      - us-east-2
+      - us-west-1
+      - us-west-2
+      - af-south-1
+      - ap-east-1
+      - ap-southeast-3
+      - ap-southeast-2
+      - ap-southeast-1
+      - ap-northeast-1
+      - ap-northeast-2
+      - ap-northeast-3
+      - ap-south-1
+      - ca-central-1
+      - eu-central-1
+      - eu-west-1
+      - eu-west-2
+      - eu-south-1
+      - eu-west-3
+      - eu-north-1
+      - me-south-1
+      - me-central-1
+      - sa-east-1
+    Description: Enter any region
+Resources:
+ neo4jUser:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: cartography-neo4j-user
+      Description: neo4j user and password
+      SecretString: !Sub '{"username":"neo4j","password":"${password}"}'
+ cartographySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to client host
+      VpcId: !Ref vpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 7474
+          ToPort: 7474
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 7473
+          ToPort: 7473
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 7687
+          ToPort: 7687
+          CidrIp: 0.0.0.0/0
+    Properties:
+      GroupName: !Sub '${CustomerAlias}-cartographyScannerInstance-SG'
+      VpcId: !Ref VpcId
+      GroupDescription: "Allow SSH/HTTPS traffic"
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-cartographySecurityGroup'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+ Ec2SsmIamRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+        - arn:aws:iam::aws:policy/SecurityAudit       
+      Policies:
+        - PolicyName: !Sub ${CustomerAlias}-sts-assume-role
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "sts:*"
+                Resource: "*"          
+        - PolicyName: !Sub ${CustomerAlias}-access-to-specific-S3-bucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                  - "s3:*"
+                Effect: "Allow"
+                Resource:
+                  - !Sub arn:aws:s3:::${CustomerAlias}-website-scans-results
+                  - !Sub arn:aws:s3:::${CustomerAlias}-website-scans-results/*
+        - PolicyName: !Sub ${CustomerAlias}-access-to-specific-Secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref neo4jUser
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-Ec2SsmIamRole-cartography'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+ Ec2SsmInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: /
+      Roles: [!Ref Ec2SsmIamRole]
+ S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketName: !Sub '${CustomerAlias}-website-scans-results'           
+ cartographyScannerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiID
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: '30'
+            DeleteOnTermination: 'true'
+            Encrypted: 'true'
+      SecurityGroupIds:
+        - !Ref cartographySecurityGroup
+      SubnetId: !Ref SubnetId
+      IamInstanceProfile: !Ref Ec2SsmInstanceProfile
+      UserData:
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash -xe
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+            sudo yum update -y && sudo yum upgrade -y
+            sudo yum install -y python3 jq git awscli sed gnupg wget 
+            cat <<EOF > /etc/yum.repos.d/neo4j.repo
+            [neo4j]
+            name=Neo4j Yum Repo
+            baseurl=http://yum.neo4j.org/stable
+            enabled=1
+            gpgcheck=1
+            EOF
+
+            #mkdir ~/.aws
+            #touch ~/.aws/config
+            #cat <<EOF > ~/.aws/config
+            #[default]
+            #credential_source = Ec2InstanceMetadata
+            #region = us-east-1
+            #output=json
+            #EOF
+
+            cd /tmp
+            wget http://debian.neo4j.org/neotechnology.gpg.key
+            rpm --import neotechnology.gpg.key
+
+            amazon-linux-extras enable java-openjdk11
+            cd /usr/local/bin
+            yum update
+            yum install neo4j -y
+            export NEO4J_PASSWORD=$(aws secretsmanager get-secret-value --region ${AwsRegion} --secret-id cartography-neo4j-user --query SecretString --output text | jq -r ".password")
+            export NEO4J_USER=$(aws secretsmanager get-secret-value --region ${AwsRegion} --secret-id cartography-neo4j-user --query SecretString --output text | jq -r ".username")    
+            sed -i '/dbms.security.auth_enabled=false/s/^#//g' /etc/neo4j/neo4j.conf
+            sed -i '/dbms.connectors.default_listen_address=0.0.0.0/s/^#//g' /etc/neo4j/neo4j.conf
+            sed -i '/dbms.connector.bolt.listen_address=:7687/s/^#//g' /etc/neo4j/neo4j.conf
+            cd /usr/share/neo4j/bin
+            neo4j-admin set-initial-password $NEO4J_PASSWORD
+            systemctl enable neo4j
+            systemctl start neo4j
+            systemctl restart neo4j
+
+            pip3 install cartography
+
+            cd /usr/local/bin/
+            ./cartography --neo4j-uri bolt://localhost:7687 --neo4j-user neo4j --neo4j-password-env-var $NEO4J_PASSWORD   
+           # cd /home/ec2-user
+           # sudo su - ec2-user -s /bin/bash -c 'git clone https://github.com/gildasio/cartography'
+           # sudo su - ec2-user -s /bin/bash -c 'chown -R ec2-user:ec2-user /home/ec2-user/cartography'
+           # sleep 5s
+           # cd /home/ec2-user/cartography
+           # pip3 install -r requirements.txt
+           # export url=$(aws ssm get-parameter --name=${CustomerAlias}-${IdentifierId}-Website-url --region us-east-1 --with-decryption | jq -r '.Parameter | .Value')
+           # ./cartography.py scan $url -p descriptions refs >> cartography.output.json
+           # sudo su - ec2-user -s /bin/bash -c 'aws s3 cp /home/ec2-user/cartography/cartography.output.json s3://${CustomerAlias}-website-scans-results/cartography/'
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-EC2-cartography'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+Outputs:
+  InstanceId:
+    Description: cartography InstanceId
+    Value: !Ref 'cartographyScannerInstance'
+    Export:
+      Name: !Sub '${CustomerAlias}-cartographyScannerInstanceId'
+  SgId:
+    Description: cartographyScannerInstance Security Group Id
+    Value: !Ref 'cartographySecurityGroup'

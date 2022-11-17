@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Nessus Professional Scanner for Securily Pentest VPC
+
+Parameters:
+  VpcId:
+    Type: String
+    Description: Please enter the VpcId.
+  CustomerAlias:
+    Type: String
+    Description: Please enter the CustomerAlias(example = bank123)
+  PrivateSubnetId:
+    Type: String
+    Description: Please enter the private subnetId.
+  InstanceType:
+    Type: String
+    Description: Please enter the instance type example t2.xlarge,t3.xlarge
+    Default: t2.xlarge
+  AmiID:
+    Type: String
+    Description: Please enter the AMI ID example NessusServer prod-us-east-1 >> ami-030690fea2f46ad37 dev-us-east-1 >> ami-043d577cadc93b041
+    Default: ami-043d577cadc93b041
+  Environment:
+    Type: String
+
+Resources:
+  NessusServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${CustomerAlias}-NessusServer-SG'
+      VpcId: !Ref VpcId
+      GroupDescription: "Allow SSH/HTTPS/8834"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8834
+          ToPort: 8834
+          CidrIp: 0.0.0.0/0
+
+  Ec2SsmIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: 
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+
+  Ec2SsmInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: /
+      Roles: [!Ref Ec2SsmIamRole]
+
+  NessusServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiID
+      InstanceType: !Ref InstanceType
+      SecurityGroupIds:
+        - !Ref NessusServerSecurityGroup
+      SubnetId: !Ref PrivateSubnetId
+      IamInstanceProfile: !Ref Ec2SsmInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerAlias}-EC2-Nessus'
+        - Key: CustomerAlias
+          Value: !Sub '${CustomerAlias}'
+
+Outputs:
+  InstanceId:
+    Description: NessusServer InstanceId
+    Value: !Ref 'NessusServer'
+  SgId:
+    Description: NessusServer SG Id
+    Value: !Ref 'NessusServerSecurityGroup'
+

@@ -1,0 +1,206 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CredHunter Open Source Scan for Securily Pentest VPC
+Parameters:
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: Please enter the VPCId.
+  CustomerName:
+    Type: String
+    Description: Please enter the CustomerName(example = bank123)
+  SubnetId:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: Please enter the subnetId.
+  InstanceType:
+    Type: String
+    Default: t3a.medium
+    AllowedValues:
+      - t3a.xlarge
+      - t3a.medium
+      - t3a.2xlarge
+      - t3a.large
+      - t3a.small
+    Description: Please enter the instance type example t3a.medium,t3a.large,t3a.xlarge,t3a.2xlarge
+  AmiID:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Description: Query for the latest Amazon Linux AMI IDs using AWS Systems Manager Parameter Store
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  AwsRegion:
+    Type: String
+    Default: us-east-1
+    AllowedValues:
+      - us-east-1
+      - us-east-2
+      - us-west-1
+      - us-west-2
+      - af-south-1
+      - ap-east-1
+      - ap-southeast-3
+      - ap-southeast-2
+      - ap-southeast-1
+      - ap-northeast-1
+      - ap-northeast-2
+      - ap-northeast-3
+      - ap-south-1
+      - ca-central-1
+      - eu-central-1
+      - eu-west-1
+      - eu-west-2
+      - eu-south-1
+      - eu-west-3
+      - eu-north-1
+      - me-south-1
+      - me-central-1
+      - sa-east-1
+    Description: Enter any region
+  Accountid:
+    Type: String
+    Description: Account id where the secrets managers is located | 12 NUMBERS REQUIRED >> 111122223333
+  Secretarn: 
+    Type: String
+    Description: Put the last part of your secret ARN (after Accountid:secret:) >> securilyli-d8d70d40/repositories-lXVLfh
+  Secretid: 
+    Type: String
+    Description: Put the last part of your secret ARN (after Accountid:secret:) >> securilyli-d8d70d40/repositories
+
+Resources:
+  CredHunterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${CustomerName}-CredHunterScannerInstance-SG'
+      VpcId: !Ref VpcId
+      GroupDescription: "Allow SSH/HTTPS traffic"
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerName}-CredHunterSecurityGroup'
+        - Key: CustomerName
+          Value: !Sub '${CustomerName}'
+  Ec2SsmIamRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess            
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+      Policies:
+        - PolicyName: !Sub ${CustomerName}-sts-assume-role
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "sts:*"
+                Resource: "*"          
+        - PolicyName: !Sub ${CustomerName}-access-to-specific-S3-bucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                  - "s3:*"
+                Effect: "Allow"
+                Resource:
+                  - !Sub arn:aws:s3:::${CustomerName}-scans-resultss
+                  - !Sub arn:aws:s3:::${CustomerName}-scans-resultss/*
+                  - !Sub arn:aws:s3:::dev-c2-credhunter-test
+                  - !Sub arn:aws:s3:::dev-c2-credhunter-test/*
+        - PolicyName: !Sub ${CustomerName}-access-to-specific-secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                  - secretsmanager:GetResourcePolicy
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:ListSecretVersionIds
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:secretsmanager:${AwsRegion}:${Accountid}:secret:${Secretarn}
+              - Effect: Allow
+                Action: secretsmanager:ListSecrets
+                Resource: "*"
+
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerName}-Ec2SsmIamRole-CredHunter'
+        - Key: CustomerName
+          Value: !Sub '${CustomerName}'
+  Ec2SsmInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: /
+      Roles: [!Ref Ec2SsmIamRole]
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketName: !Sub '${CustomerName}-scans-resultss'           
+  CredHunterScannerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiID
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: '30'
+            DeleteOnTermination: 'true'
+            Encrypted: 'true'
+      SecurityGroupIds:
+        - !Ref CredHunterSecurityGroup
+      SubnetId: !Ref SubnetId
+      IamInstanceProfile: !Ref Ec2SsmInstanceProfile
+      UserData:
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash -xe
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+            sudo yum update -y && sudo yum upgrade -y
+            sudo yum install -y python3 jq git awscli
+            sudo pip3 install detect-secrets==1.0.3
+            cd /home/ec2-user
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -o awscliv2.zip
+            sudo ./aws/install --update
+            wget https://download.java.net/java/GA/jdk17/0d483333a00540d886896bac774ff48b/35/GPL/openjdk-17_linux-x64_bin.tar.gz
+            tar xvf openjdk-17_linux-x64_bin.tar.gz
+            mv jdk-17 /opt/
+            sudo chown -R ec2-user:ec2-user /home/ec2-user/*
+            tee /etc/profile.d/jdk.sh <<EOF
+            export JAVA_HOME=/opt/jdk-17
+            export PATH=\$PATH:\$JAVA_HOME/bin
+            EOF
+            source /etc/profile.d/jdk.sh
+            sudo su - ec2-user -s /bin/bash -c 'aws s3 cp s3://dev-c2-credhunter-test chunter --recursive'
+            sudo su - ec2-user -s /bin/bash -c 'mv /home/ec2-user/chunter/september_30.license /home/ec2-user/chunter/.license'
+            sleep 5s
+            sudo su - ec2-user -s /bin/bash -c 'cd /home/ec2-user/chunter/'     
+            sudo su - ec2-user -s /bin/bash -c 'aws secretsmanager get-secret-value --secret-id securilyli-d8d70d40/repositories --query SecretString --output text | jq -r '."repository.1"'  >>  /home/ec2-user/chunter/repo1.txt'    
+   #        sudo su - ec2-user -s /bin/bash -c 'git clone  '
+   #        sudo su - ec2-user -s /bin/bash -c ''
+   #        sudo su - ec2-user -s /bin/bash -c 'cd /home/ec2-user/chunter' 
+   #        sudo cd /home/ec2-user/chunter && java -jar CredHunter.jar -r ./(NOMBRE DE LOS REPOS) -o NOMBREDELREPO.out.json -cmax 10
+   #        sudo su - ec2-user -s /bin/bash -c 'aws s3 cp /home/ec2-user/chunter/NOMBREDELREPO.out.json s3://${CustomerName}-scans-resultss/'
+            
+      Tags:
+        - Key: Name
+          Value: !Sub '${CustomerName}-EC2-CredHunter'
+        - Key: CustomerName
+          Value: !Sub '${CustomerName}'
+Outputs:
+  InstanceId:
+    Description: CredHunter InstanceId
+    Value: !Ref 'CredHunterScannerInstance'
+    Export:
+      Name: !Sub '${CustomerName}-CredHunterScannerInstanceId'
+  SgId:
+    Description: CredHunterScannerInstance Security Group Id
+    Value: !Ref 'CredHunterSecurityGroup'

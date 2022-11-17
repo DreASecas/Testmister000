@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CredHunter Open Source Scan for Securily Pentest VPC
+Parameters:
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: Please enter the VPCId.
+  ScannerName:
+    Type: String
+    Description: Please enter the ScannerName(example = bank123)
+  SubnetId:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: Please enter the subnetId.
+  InstanceType:
+    Type: String
+    Description: Please enter the instance type example t3a.medium,t3a.large,t3a.xlarge,t3a.2xlarge
+    Default: t3a.medium
+  AwsRegion:
+    Type: String
+    Description: Please enter the AWS region example:us-east-1
+    Default: us-east-1
+  AmiID:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Description: Query for the latest Amazon Linux AMI IDs using AWS Systems Manager Parameter Store
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+Resources:
+  CredHunterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${ScannerName}-CredHunterScannerInstance-SG'
+      VpcId: !Ref VpcId
+      GroupDescription: "Allow SSH/HTTPS traffic"
+      Tags:
+        - Key: Name
+          Value: !Sub '${ScannerName}-CredHunterSecurityGroup'
+        - Key: ScannerName
+          Value: !Sub '${ScannerName}'
+  Ec2SsmIamRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess            
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+      Policies:
+        - PolicyName: !Sub ${ScannerName}-sts-assume-role
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "sts:*"
+                Resource: "*"        
+        - PolicyName: !Sub ${ScannerName}-access-to-specific-S3-bucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                  - "s3:*"
+                Effect: "Allow"
+                Resource:
+                  - !Sub arn:aws:s3:::${ScannerName}-scans-results
+                  - !Sub arn:aws:s3:::${ScannerName}-scans-results/*
+                  - !Sub arn:aws:s3:::$dev-c2-credhunter-test
+                  - !Sub arn:aws:s3:::$dev-c2-credhunter-test/*
+        - PolicyName: !Sub ${ScannerName}-access-to-specific-secret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                  - secretsmanager:GetResourcePolicy
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:ListSecretVersionIds
+                Resource:
+                  - arn:aws:secretsmanager:us-east-1:386466482058:secret:securilyli-d8d70d40/repositories-lXVLfh
+              - Effect: Allow
+                               
+      Tags:
+        - Key: Name
+          Value: !Sub '${ScannerName}-Ec2SsmIamRole-CredHunter'
+        - Key: ScannerName
+          Value: !Sub '${ScannerName}'
+  Ec2SsmInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: /
+      Roles: [!Ref Ec2SsmIamRole]
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketName: !Sub '${ScannerName}-scans-results'           
+  CredHunterScannerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiID
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: '30'
+            DeleteOnTermination: 'true'
+            Encrypted: 'true'
+      SecurityGroupIds:
+        - !Ref CredHunterSecurityGroup
+      SubnetId: !Ref SubnetId
+      IamInstanceProfile: !Ref Ec2SsmInstanceProfile
+      UserData:
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash -xe
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+            sudo yum update -y && sudo yum upgrade -y
+            sudo yum install -y python3 jq git awscli
+            sudo pip3 install detect-secrets==1.0.3
+            cd /home/ec2-user
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -o awscliv2.zip
+            sudo ./aws/install --update
+            wget https://download.java.net/java/GA/jdk17/0d483333a00540d886896bac774ff48b/35/GPL/openjdk-17_linux-x64_bin.tar.gz
+            tar xvf openjdk-17_linux-x64_bin.tar.gz
+            mv jdk-17 /opt/
+            sudo chown -R ec2-user:ec2-user /home/ec2-user/*
+            tee /etc/profile.d/jdk.sh <<EOF
+            export JAVA_HOME=/opt/jdk-17
+            export PATH=\$PATH:\$JAVA_HOME/bin
+            EOF
+            source /etc/profile.d/jdk.sh
+            sudo su - ec2-user -s /bin/bash -c 'aws s3 cp s3://dev-c2-credhunter-test chunter --recursive'
+            sleep 5s
+            sudo su - ec2-user -s /bin/bash -c 'cd /home/ec2-user/chunter/things/'            
+            sudo su - ec2-user -s /bin/bash -c 'git clone https://github.com/WebGoat/WebGoat.git'
+            sudo su - ec2-user -s /bin/bash -c 'mv /home/ec2-user/chunter/things/september_30.license /home/ec2-user/chunter/things/.license'
+            sudo su - ec2-user -s /bin/bash -c 'cd /home/ec2-user/chunter/things' 
+            sudo su - ec2-user -s /bin/bash -c 'mv WebGoat/ chunter/things/'
+            sudo cd /home/ec2-user/chunter/things && java -jar CredHunter.jar -r ./WebGoat -o webgoat.out.html -cmax 10
+            
+      Tags:
+        - Key: Name
+          Value: !Sub '${ScannerName}-EC2-CredHunter'
+        - Key: ScannerName
+          Value: !Sub '${ScannerName}'
+Outputs:
+  InstanceId:
+    Description: CredHunter InstanceId
+    Value: !Ref 'CredHunterScannerInstance'
+    Export:
+      Name: !Sub '${ScannerName}-CredHunterScannerInstanceId'
+  SgId:
+    Description: CredHunterScannerInstance Security Group Id
+    Value: !Ref 'CredHunterSecurityGroup'
